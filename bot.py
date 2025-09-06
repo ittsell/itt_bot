@@ -1,56 +1,77 @@
-# bot.py -- polling bot, always-on friendly, no DB (simple JSON optional)
+# bot.py
 import os
 import logging
 from datetime import datetime, date
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ConversationHandler,
-    filters, ContextTypes
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ConversationHandler,
+    filters,
+    ContextTypes,
 )
 
+# ---------------- CONFIG (read from env) ----------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")                 # set on host
+GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")         # set on host (must be negative)
+if GROUP_CHAT_ID:
+    GROUP_CHAT_ID = int(GROUP_CHAT_ID)
+
+# Validate env
+if not BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN environment variable is required.")
+if not GROUP_CHAT_ID:
+    raise SystemExit("GROUP_CHAT_ID environment variable is required (negative number).")
+
+# ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Read config from environment
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")   # must be a string like -1001234567890
-ADMIN_ID = os.getenv("ADMIN_ID")             # optional: for notifications
-
-if not BOT_TOKEN or not GROUP_CHAT_ID:
-    logger.error("BOT_TOKEN and GROUP_CHAT_ID environment variables must be set.")
-    raise SystemExit("Set BOT_TOKEN and GROUP_CHAT_ID env vars")
-
-try:
-    GROUP_CHAT_ID = int(GROUP_CHAT_ID)
-except:
-    raise SystemExit("GROUP_CHAT_ID must be an integer (negative for groups)")
-
-# Conversation states
+# ---------------- Conversation states ----------------
 COUNT, SOURCE, DEST, DATE, TRAIN, GENDER, PRICE, CONFIRM = range(8)
 
-# Keep per-user conversation data in context.user_data (built-in); no DB required.
+# ---------------- Helpers ----------------
+def parse_date_yyyy_mm_dd(s: str):
+    try:
+        return datetime.strptime(s.strip(), "%Y-%m-%d").date()
+    except Exception:
+        return None
 
+def gender_normalize(s: str):
+    s = s.strip().lower()
+    if s in ("m", "male"):
+        return "Male"
+    if s in ("f", "female"):
+        return "Female"
+    if s in ("other", "o"):
+        return "Other"
+    return None
+
+# ---------------- Handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[KeyboardButton("🎟 Sell Ticket")]]
-    await update.message.reply_text("Welcome to Indian Train Tickets (ITT).\nClick Sell Ticket to begin.",
-                                    reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True, one_time_keyboard=True))
+    kb = [["Sell Ticket"]]
+    reply = ReplyKeyboardMarkup(kb, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        "Welcome to Indian Train Tickets Bot.\n\nPress the button to sell a ticket.",
+        reply_markup=reply,
+    )
 
-# entrypoint for sell: user clicks button or types /sell
 async def sell_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        await update.message.reply_text("Please message me in private (DM) to sell tickets.")
-        return ConversationHandler.END
+    # Entry to conversation, triggered by the keyboard or /sell
     context.user_data.clear()
-    await update.message.reply_text("How many tickets do you want to sell? (enter a number)")
+    await update.message.reply_text("How many tickets do you want to sell? (number)", reply_markup=ReplyKeyboardRemove())
     return COUNT
 
 async def ask_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     if not txt.isdigit() or int(txt) <= 0:
-        await update.message.reply_text("Enter a valid positive integer for ticket count.")
+        await update.message.reply_text("Please send a valid positive integer for ticket count.")
         return COUNT
-    context.user_data["count"] = int(txt)
+    count = int(txt)
+    context.user_data["count"] = count
     context.user_data["genders"] = []
+    context.user_data["gender_index"] = 0
     await update.message.reply_text("Enter Source station (e.g., Chennai):")
     return SOURCE
 
@@ -59,114 +80,96 @@ async def ask_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Enter Destination station (e.g., Trivandrum):")
     return DEST
 
-def parse_date_iso(s: str):
-    try:
-        return datetime.strptime(s.strip(), "%Y-%m-%d").date()
-    except:
-        return None
-
 async def ask_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["destination"] = update.message.text.strip()
-    await update.message.reply_text("Enter Journey Date (YYYY-MM-DD):")
+    context.user_data["dest"] = update.message.text.strip()
+    await update.message.reply_text("Enter Journey date (YYYY-MM-DD):")
     return DATE
 
 async def ask_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
-    d = parse_date_iso(txt)
+    d = parse_date_yyyy_mm_dd(txt)
     if not d:
-        await update.message.reply_text("Invalid date. Use YYYY-MM-DD (e.g., 2025-10-29). Try again:")
+        await update.message.reply_text("Invalid date format. Use YYYY-MM-DD (e.g., 2025-10-29). Try again:")
         return DATE
     if d < date.today():
-        await update.message.reply_text("Date is before today. Please enter a future date (YYYY-MM-DD):")
+        await update.message.reply_text("Date cannot be in the past. Enter a future date (YYYY-MM-DD):")
         return DATE
     context.user_data["date"] = d.isoformat()
-    await update.message.reply_text("Enter Train number (e.g., 16605):")
+    await update.message.reply_text("Enter Train Number (e.g., 16605):")
     return TRAIN
 
 async def ask_train(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["train"] = update.message.text.strip()
     # start gender questions
-    context.user_data["genders"] = []
     context.user_data["gender_index"] = 1
-    await update.message.reply_text(f"Enter gender for passenger 1 (Male/Female/Other):")
+    await update.message.reply_text(f"Enter gender of passenger 1 (Male/Female/Other):")
     return GENDER
 
 async def ask_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text.strip().title()
-    if txt not in ("Male", "Female", "Other"):
-        await update.message.reply_text("Please reply Male, Female, or Other.")
+    g = gender_normalize(update.message.text)
+    if not g:
+        await update.message.reply_text("Invalid gender. Reply with Male, Female or Other:")
         return GENDER
-    context.user_data["genders"].append(txt)
+    context.user_data["genders"].append(g)
     if len(context.user_data["genders"]) < context.user_data["count"]:
-        context.user_data["gender_index"] += 1
-        await update.message.reply_text(f"Enter gender for passenger {context.user_data['gender_index']}:")
+        idx = len(context.user_data["genders"]) + 1
+        await update.message.reply_text(f"Enter gender of passenger {idx} (Male/Female/Other):")
         return GENDER
-    # done collecting genders
-    await update.message.reply_text("Enter total ticket price in ₹ (numbers only):")
+    # all genders collected
+    await update.message.reply_text("Enter total ticket price (in ₹):")
     return PRICE
 
 async def ask_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     try:
         price = float(txt)
-        if price <= 0:
-            raise ValueError()
-    except:
-        await update.message.reply_text("Enter a valid numeric price (e.g., 250).")
+        if price < 0:
+            raise ValueError
+    except Exception:
+        await update.message.reply_text("Invalid price. Enter a numeric value (e.g., 1200):")
         return PRICE
     context.user_data["price"] = price
 
-    # summary & confirm
+    # show summary with Confirm/Cancel instruction
+    info = context.user_data
     summary = (
-        f"Please confirm your ticket details:\n\n"
-        f"From: {context.user_data['source']} → {context.user_data['destination']}\n"
-        f"Date: {context.user_data['date']}\n"
-        f"Train: {context.user_data['train']}\n"
-        f"Tickets: {context.user_data['count']}\n"
-        f"Genders: {', '.join(context.user_data['genders'])}\n"
-        f"Price: ₹{context.user_data['price']}\n\n"
-        "Reply YES to post to group, or NO to cancel."
+        f"Please confirm your ticket:\n\n"
+        f"From: {info['source']} → {info['dest']}\n"
+        f"Date: {info['date']}\n"
+        f"Train: {info['train']}\n"
+        f"Tickets: {info['count']}\n"
+        f"Genders: {', '.join(info['genders'])}\n"
+        f"Price: ₹{info['price']}\n\n"
+        "Reply with YES to confirm and post to group, or NO to cancel."
     )
     await update.message.reply_text(summary)
     return CONFIRM
 
-async def confirm_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip().lower()
     if txt not in ("yes", "y"):
         await update.message.reply_text("Submission cancelled.")
         context.user_data.clear()
         return ConversationHandler.END
 
-    # Compose message to group and post directly
-    seller = update.effective_user
-    ticket_text = (
-        f"🎫 New Ticket Posted\n\n"
-        f"From: {context.user_data['source']} → {context.user_data['destination']}\n"
-        f"Date: {context.user_data['date']}\n"
-        f"Train: {context.user_data['train']}\n"
-        f"Tickets: {context.user_data['count']}\n"
-        f"Genders: {', '.join(context.user_data['genders'])}\n"
-        f"💰 Price: ₹{context.user_data['price']}\n\n"
-        f"Contact admin to buy."
+    info = context.user_data
+    # Build message for group
+    post = (
+        f"🎫 New Ticket Available 🎫\n\n"
+        f"🚉 {info['source']} → {info['dest']}\n"
+        f"📅 {info['date']} | 🚆 {info['train']}\n"
+        f"🧾 Tickets: {info['count']} | Genders: {', '.join(info['genders'])}\n"
+        f"💰 Price: ₹{info['price']}\n\n"
+        f"👉 Contact the admin to buy."
     )
-
-    # post to group
     try:
-        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=ticket_text)
+        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=post)
     except Exception as e:
         logger.exception("Failed to post to group: %s", e)
-        await update.message.reply_text("Failed to post to group. Make sure bot is admin in the group and GROUP_CHAT_ID is correct.")
+        await update.message.reply_text("Failed to post to group — please check group ID and that the bot is admin.")
         return ConversationHandler.END
 
-    # optionally notify admin privately including seller id
-    if ADMIN_ID:
-        try:
-            await context.bot.send_message(chat_id=int(ADMIN_ID),
-                                           text=f"Ticket posted by @{seller.username or seller.id} (id {seller.id}). Price: ₹{context.user_data['price']}")
-        except Exception:
-            pass
-
-    await update.message.reply_text("✅ Ticket posted to group. Thank you!")
+    await update.message.reply_text("✅ Your ticket has been posted to the group. Thank you!")
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -175,12 +178,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
+# ---------------- Main ----------------
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("sell", sell_entry),
-                      MessageHandler(filters.Regex("^🎟 Sell Ticket$"), sell_entry)],
+        entry_points=[
+            CommandHandler("sell", sell_entry),
+            MessageHandler(filters.Regex("^(Sell Ticket)$") & ~filters.COMMAND, sell_entry),
+        ],
         states={
             COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_count)],
             SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_source)],
@@ -189,15 +195,17 @@ def main():
             TRAIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_train)],
             GENDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_gender)],
             PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_price)],
-            CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_submission)],
+            CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_post)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        name="sell_conv",
+        persistent=False,
     )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
 
-    logger.info("Bot starting (polling)...")
+    logger.info("Bot polling starting...")
     app.run_polling()
 
 if __name__ == "__main__":
