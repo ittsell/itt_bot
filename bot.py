@@ -19,7 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------- Configuration ----------------
-BOT_TOKEN = "YOUR_BOT_TOKEN"
+BOT_TOKEN = "7423784466:AAE_IDLMRaNF-gZQ673ROVKeqO7day86SKo"
 GROUP_CHAT_ID = -1001234567890       # Replace with your group chat ID
 ADMIN_ID = 8238096030                # Replace with your admin ID
 
